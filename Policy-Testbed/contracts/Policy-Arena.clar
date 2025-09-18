@@ -10,6 +10,8 @@
 (define-constant ERR-INSUFFICIENT-STAKE (err u104))
 (define-constant ERR-SIMULATION-NOT-FOUND (err u105))
 (define-constant ERR-INVALID-PARAMETERS (err u106))
+(define-constant ERR-INVALID-CATEGORY (err u107))
+(define-constant ERR-IMPACT-OUT-OF-RANGE (err u108))
 
 ;; Minimum stake required to create a policy proposal
 (define-constant MIN-STAKE u1000000) ;; 1 STX in microSTX
@@ -19,6 +21,10 @@
 (define-constant POLICY-PASSED u2)
 (define-constant POLICY-REJECTED u3)
 (define-constant POLICY-EXECUTED u4)
+
+;; Impact score limits (-1000 to 1000)
+(define-constant MIN-IMPACT -1000)
+(define-constant MAX-IMPACT 1000)
 
 ;; Data Variables
 (define-data-var policy-counter uint u0)
@@ -81,6 +87,12 @@
   uint
 )
 
+;; Valid categories list
+(define-map valid-categories 
+  (string-ascii 50) 
+  bool
+)
+
 ;; Read-only functions
 
 ;; Get policy details
@@ -139,17 +151,50 @@
   )
 )
 
+;; Check if category is valid
+(define-read-only (is-valid-category (category (string-ascii 50)))
+  (default-to false (map-get? valid-categories category))
+)
+
+;; Check if impact score is in valid range
+(define-read-only (is-valid-impact (impact int))
+  (and (>= impact MIN-IMPACT) (<= impact MAX-IMPACT))
+)
+
 ;; Public functions
 
 ;; Initialize category weights (only contract owner)
 (define-public (initialize-categories)
   (begin
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    
+    ;; Set category weights
     (map-set category-weights "economic" u100)
     (map-set category-weights "social" u80)
     (map-set category-weights "environmental" u90)
     (map-set category-weights "governance" u110)
     (map-set category-weights "infrastructure" u95)
+    
+    ;; Set valid categories
+    (map-set valid-categories "economic" true)
+    (map-set valid-categories "social" true)
+    (map-set valid-categories "environmental" true)
+    (map-set valid-categories "governance" true)
+    (map-set valid-categories "infrastructure" true)
+    
+    (ok true)
+  )
+)
+
+;; Add new valid category (only contract owner)
+(define-public (add-valid-category (category (string-ascii 50)) (weight uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (> (len category) u0) ERR-INVALID-PARAMETERS)
+    (asserts! (> weight u0) ERR-INVALID-PARAMETERS)
+    
+    (map-set valid-categories category true)
+    (map-set category-weights category weight)
     (ok true)
   )
 )
@@ -172,6 +217,7 @@
     (asserts! (> voting-duration u0) ERR-INVALID-PARAMETERS)
     (asserts! (> (len title) u0) ERR-INVALID-PARAMETERS)
     (asserts! (> (len description) u0) ERR-INVALID-PARAMETERS)
+    (asserts! (is-valid-category category) ERR-INVALID-CATEGORY)
     
     ;; Transfer stake to contract
     (try! (stx-transfer? stake-amount tx-sender (as-contract tx-sender)))
@@ -293,6 +339,9 @@
     ;; Validate inputs
     (asserts! (> (len parameters) u0) ERR-INVALID-PARAMETERS)
     (asserts! (> (len results) u0) ERR-INVALID-PARAMETERS)
+    (asserts! (is-valid-impact economic-impact) ERR-IMPACT-OUT-OF-RANGE)
+    (asserts! (is-valid-impact social-impact) ERR-IMPACT-OUT-OF-RANGE)
+    (asserts! (is-valid-impact environmental-impact) ERR-IMPACT-OUT-OF-RANGE)
     
     ;; Create simulation
     (map-set simulations simulation-id {
@@ -337,13 +386,15 @@
   )
 )
 
-;; Update voter reputation and statistics
+;; Update voter reputation and statistics (only contract owner or authorized users)
 (define-public (update-reputation 
     (voter principal) 
     (correct-prediction bool)
   )
   (begin
-    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    ;; Only contract owner can update reputation or the voter themselves
+    (asserts! (or (is-eq tx-sender CONTRACT-OWNER) 
+                  (is-eq tx-sender voter)) ERR-NOT-AUTHORIZED)
     
     (match (map-get? voter-registry voter)
       voter-info
